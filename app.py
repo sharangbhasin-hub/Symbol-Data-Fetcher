@@ -26,69 +26,66 @@ OANDA_BASE = (
 
 # --- Alpha Vantage helpers (FX daily/weekly/monthly) ---
 
-def fetch_alpha_fx(pair: str, timeframe: str, output_size: str = "full") -> pd.DataFrame:
+def fetch_alpha_equity(symbol: str, timeframe: str, output_size: str = "full") -> pd.DataFrame:
     """
-    Fetch FX time series from Alpha Vantage.
-    Limitations (documented):
-    - No 'from'/'to' for FX time series; must request compact/full and filter locally.[web:1]
-    - Free key is rate-limited, so large/ frequent requests can be throttled.[web:21][web:88]
+    Fetch equity time series from Alpha Vantage (daily/weekly/monthly) using documented functions.[file:1]
     """
 
     tf_map = {
-        "daily": "FX_DAILY",
-        "weekly": "FX_WEEKLY",
-        "monthly": "FX_MONTHLY",
+        "daily": "TIME_SERIES_DAILY",
+        "weekly": "TIME_SERIES_WEEKLY",
+        "monthly": "TIME_SERIES_MONTHLY",
     }
     if timeframe not in tf_map:
-        raise ValueError("For safety, this app supports daily/weekly/monthly for Alpha Vantage.")
+        raise ValueError("This app supports daily/weekly/monthly for Alpha Vantage.")
 
-    from_symbol, to_symbol = pair.split("/")
     func = tf_map[timeframe]
 
     params = {
         "function": func,
-        "from_symbol": from_symbol,
-        "to_symbol": to_symbol,
+        "symbol": symbol,
         "apikey": ALPHA_KEY,
-        "outputsize": output_size,  # 'compact' or 'full'[web:1]
     }
+    # Only TIME_SERIES_DAILY supports outputsize; weekly/monthly ignore outputsize per docs.[file:1]
+    if timeframe == "daily":
+        params["outputsize"] = output_size  # 'compact' or 'full'
 
     url = "https://www.alphavantage.co/query"
     r = requests.get(url, params=params, timeout=30)
     r.raise_for_status()
     data = r.json()
 
-    # Detect time series key per docs (e.g. "Time Series FX (Daily)")
+    # Detect time series key per docs (e.g. "Time Series (Daily)", "Weekly Time Series").[file:1]
     ts_key = next((k for k in data.keys() if "Time Series" in k), None)
     if ts_key is None:
-        # Typical error when hitting limits is returned in JSON under "Note" or "Error Message"[web:1][web:21]
         raise ValueError(f"Unexpected Alpha Vantage response: {data}")
 
     ts = data[ts_key]
     df = pd.DataFrame(ts).T
     df.index = pd.to_datetime(df.index)
 
-    # FX series typically contain open, high, low, close fields as 1–4.[web:1]
+    # Columns names in equity time series.[file:1]
     rename_map = {
         "1. open": "open",
         "2. high": "high",
         "3. low": "low",
         "4. close": "close",
+        "5. volume": "volume",
     }
     df = df.rename(columns=rename_map)
+    # Keep only existing columns in the map
+    df = df[[c for c in rename_map.values() if c in df.columns]]
     df = df.astype(float)
     df = df.sort_index()
     return df
 
-
-def fetch_alpha_fx_range(pair: str, timeframe: str, start, end) -> pd.DataFrame:
-    """Fetch Alpha Vantage FX data and filter between start and end dates."""
-    df = fetch_alpha_fx(pair, timeframe, output_size="full")
+def fetch_alpha_equity_range(symbol: str, timeframe: str, start, end) -> pd.DataFrame:
+    """Fetch Alpha Vantage equity data and filter between start and end dates."""
+    df = fetch_alpha_equity(symbol, timeframe, output_size="full")
     start_dt = pd.to_datetime(start)
     end_dt = pd.to_datetime(end)
     mask = (df.index >= start_dt) & (df.index <= end_dt)
     return df.loc[mask]
-
 
 # --- OANDA helpers (candles with from/to) ---
 
@@ -236,11 +233,11 @@ if start_date > end_date:
 # Source-specific settings
 if source == "Alpha Vantage":
     st.sidebar.header("3. Alpha Vantage Settings")
-    pair = st.sidebar.text_input("FX pair (FROM/TO)", "EUR/USD")
+    symbol = st.sidebar.text_input("Equity symbol (e.g. IBM, RELIANCE.BSE)", "IBM")
     timeframe = st.sidebar.selectbox(
         "Timeframe",
         ["daily", "weekly", "monthly"],
-        help="Intraday extended is not exposed here because it requires month-slice loops.[web:61][web:82]",
+        help="Uses TIME_SERIES_DAILY / WEEKLY / MONTHLY as per Alpha Vantage docs.[file:1]",
     )
 else:
     st.sidebar.header("3. OANDA Settings")
@@ -266,7 +263,7 @@ if fetch_button:
             if not ALPHA_KEY:
                 st.error("ALPHA_VANTAGE_API_KEY is not set in environment/.env.")
                 st.stop()
-            df = fetch_alpha_fx_range(pair, timeframe, start_date, end_date)
+            df = fetch_alpha_equity_range(symbol, timeframe, start_date, end_date)
         else:
             if not OANDA_KEY:
                 st.error("OANDA_API_KEY is not set in environment/.env.")
@@ -286,7 +283,7 @@ if fetch_button:
         st.subheader("Download as Excel (single file)")
         timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         if source == "Alpha Vantage":
-            fname = f"alpha_{pair.replace('/','_')}_{timeframe}_{start_date}_{end_date}_{timestamp}.xlsx"
+            fname = f"alpha_{symbol}_{timeframe}_{start_date}_{end_date}_{timestamp}.xlsx"
         else:
             fname = f"oanda_{instrument}_{granularity}_{start_date}_{end_date}_{timestamp}.xlsx"
 
