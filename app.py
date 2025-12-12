@@ -23,14 +23,12 @@ OANDA_BASE = (
     else "https://api-fxtrade.oanda.com/v3"
 )
 
-
-# --- Alpha Vantage helpers (FX daily/weekly/monthly) ---
+# --- Alpha Vantage helpers (equity daily/weekly/monthly) ---
 
 def fetch_alpha_equity(symbol: str, timeframe: str, output_size: str = "full") -> pd.DataFrame:
     """
     Fetch equity time series from Alpha Vantage (daily/weekly/monthly) using documented functions.[file:1]
     """
-
     tf_map = {
         "daily": "TIME_SERIES_DAILY",
         "weekly": "TIME_SERIES_WEEKLY",
@@ -64,7 +62,7 @@ def fetch_alpha_equity(symbol: str, timeframe: str, output_size: str = "full") -
     df = pd.DataFrame(ts).T
     df.index = pd.to_datetime(df.index)
 
-    # Columns names in equity time series.[file:1]
+    # Column names in equity time series.[file:1]
     rename_map = {
         "1. open": "open",
         "2. high": "high",
@@ -73,11 +71,11 @@ def fetch_alpha_equity(symbol: str, timeframe: str, output_size: str = "full") -
         "5. volume": "volume",
     }
     df = df.rename(columns=rename_map)
-    # Keep only existing columns in the map
     df = df[[c for c in rename_map.values() if c in df.columns]]
     df = df.astype(float)
     df = df.sort_index()
     return df
+
 
 def fetch_alpha_equity_range(symbol: str, timeframe: str, start, end) -> pd.DataFrame:
     """Fetch Alpha Vantage equity data and filter between start and end dates."""
@@ -86,6 +84,7 @@ def fetch_alpha_equity_range(symbol: str, timeframe: str, start, end) -> pd.Data
     end_dt = pd.to_datetime(end)
     mask = (df.index >= start_dt) & (df.index <= end_dt)
     return df.loc[mask]
+
 
 # --- OANDA helpers (candles with from/to) ---
 
@@ -148,6 +147,80 @@ def fetch_oanda_fx_range(
 
     df = pd.DataFrame(records).set_index("time").sort_index()
     return df
+
+
+def fetch_oanda_fx_range_chunked(
+    instrument: str,
+    granularity: str,
+    start,
+    end,
+    price: str = "M",
+    max_candles_per_call: int = 5000,
+) -> pd.DataFrame:
+    """
+    Fetch OANDA candles over a long range by splitting into smaller chunks
+    so that each API call stays under the max candles limit.[web:62][web:123]
+    """
+    seconds_per_candle_map = {
+        "M1": 60,
+        "M2": 120,
+        "M4": 240,
+        "M5": 300,
+        "M10": 600,
+        "M15": 900,
+        "M30": 1800,
+        "H1": 3600,
+        "H2": 7200,
+        "H3": 10800,
+        "H4": 14400,
+        "H6": 21600,
+        "H8": 28800,
+        "H12": 43200,
+        "D": 86400,
+        "W": 604800,
+        "M": 2592000,  # ~30 days
+    }
+
+    if granularity not in seconds_per_candle_map:
+        # Fall back to single call if unknown granularity
+        return fetch_oanda_fx_range(instrument, granularity, start, end, price=price)
+
+    seconds_per_candle = seconds_per_candle_map[granularity]
+
+    start_dt = pd.to_datetime(start)
+    end_dt = pd.to_datetime(end)
+
+    max_seconds_per_chunk = max_candles_per_call * seconds_per_candle
+
+    chunks = []
+    current_start = start_dt
+
+    while current_start < end_dt:
+        current_end = current_start + pd.to_timedelta(max_seconds_per_chunk, unit="s")
+        if current_end > end_dt:
+            current_end = end_dt
+
+        df_chunk = fetch_oanda_fx_range(
+            instrument,
+            granularity,
+            current_start,
+            current_end,
+            price=price,
+        )
+
+        if not df_chunk.empty:
+            chunks.append(df_chunk)
+
+        # Move forward by one candle to avoid overlap
+        current_start = current_end + pd.to_timedelta(seconds_per_candle, unit="s")
+
+    if not chunks:
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+
+    df_all = pd.concat(chunks)
+    df_all = df_all[~df_all.index.duplicated(keep="last")]
+    df_all = df_all.sort_index()
+    return df_all
 
 
 # --- Data quality checks (for both providers) ---
@@ -251,7 +324,6 @@ else:
 st.sidebar.header("4. Action")
 fetch_button = st.sidebar.button("Fetch data")
 
-
 # Main panel
 if fetch_button:
     if start_date > end_date:
@@ -268,7 +340,7 @@ if fetch_button:
             if not OANDA_KEY:
                 st.error("OANDA_API_KEY is not set in environment/.env.")
                 st.stop()
-            df = fetch_oanda_fx_range(instrument, granularity, start_date, end_date)
+            df = fetch_oanda_fx_range_chunked(instrument, granularity, start_date, end_date)
 
         st.subheader("Data preview")
         if df.empty:
