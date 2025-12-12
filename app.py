@@ -23,6 +23,9 @@ OANDA_BASE = (
     else "https://api-fxtrade.oanda.com/v3"
 )
 
+# Target timezone (GMT+2), using an IANA timezone
+GMT_PLUS_2_TZ = "Europe/Athens"  # example GMT+2 zone[web:170]
+
 # --- Alpha Vantage helpers (equity daily/weekly/monthly) ---
 
 def fetch_alpha_equity(symbol: str, timeframe: str, output_size: str = "full") -> pd.DataFrame:
@@ -223,6 +226,49 @@ def fetch_oanda_fx_range_chunked(
     return df_all
 
 
+# --- Timezone helpers ---
+
+def convert_index_to_gmt_plus_2(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Convert any DatetimeIndex (UTC or naive) to GMT+2 (e.g. Europe/Athens),
+    keeping it tz-aware.[web:166][web:175]
+    """
+    df2 = df.copy()
+
+    if not isinstance(df2.index, pd.DatetimeIndex):
+        return df2
+
+    idx = df2.index
+
+    # If naive, assume UTC then convert to GMT+2
+    if idx.tz is None:
+        idx = idx.tz_localize("UTC").tz_convert(GMT_PLUS_2_TZ)
+    else:
+        idx = idx.tz_convert(GMT_PLUS_2_TZ)
+
+    df2.index = idx
+    return df2
+
+
+def make_timezone_naive(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Return a copy of df with any timezone-aware datetimes converted to timezone-naive,
+    so Excel can handle them.[web:149][web:157]
+    """
+    df2 = df.copy()
+
+    # Fix index if it's a DatetimeIndex with tz
+    if isinstance(df2.index, pd.DatetimeIndex) and df2.index.tz is not None:
+        df2.index = df2.index.tz_localize(None)
+
+    # Fix datetime columns with timezone
+    for col in df2.columns:
+        if pd.api.types.is_datetime64tz_dtype(df2[col]):
+            df2[col] = df2[col].dt.tz_localize(None)
+
+    return df2
+
+
 # --- Data quality checks (for both providers) ---
 
 def quality_checks(df: pd.DataFrame) -> dict:
@@ -278,9 +324,12 @@ def df_to_excel_bytes(df: pd.DataFrame, sheet_name: str = "data") -> bytes:
     """
     Write a DataFrame to an in-memory Excel file and return bytes.
     """
+    # Remove timezone information so Excel writer does not fail.[web:149][web:153]
+    df_clean = make_timezone_naive(df)
+
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
-        df.to_excel(writer, sheet_name=sheet_name)
+        df_clean.to_excel(writer, sheet_name=sheet_name)
     buffer.seek(0)
     return buffer.getvalue()
 
@@ -336,11 +385,20 @@ if fetch_button:
                 st.error("ALPHA_VANTAGE_API_KEY is not set in environment/.env.")
                 st.stop()
             df = fetch_alpha_equity_range(symbol, timeframe, start_date, end_date)
+            # Alpha Vantage times are usually in the market's local timezone (e.g. US/Eastern for US stocks).[file:1][web:173]
+            # Treat them as naive local times; localize to US/Eastern, then convert to GMT+2.
+            if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is None:
+                df.index = df.index.tz_localize("US/Eastern").tz_convert(GMT_PLUS_2_TZ)
+            else:
+                df = convert_index_to_gmt_plus_2(df)
+
         else:
             if not OANDA_KEY:
                 st.error("OANDA_API_KEY is not set in environment/.env.")
                 st.stop()
             df = fetch_oanda_fx_range_chunked(instrument, granularity, start_date, end_date)
+            # OANDA returns times in UTC; convert UTC -> GMT+2.[web:62]
+            df = convert_index_to_gmt_plus_2(df)
 
         st.subheader("Data preview")
         if df.empty:
